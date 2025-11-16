@@ -1,0 +1,39 @@
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+dist/
+build/
+.cache/
+coverage/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*
+yarn-error.log*
+
+# project-level PNPM store
+.pnpm-store/
+
+# --- Env / Secrets ---
+.env
+.env.*
+!.env.example
+frontend-main/.env.local
+backend-main/.env
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# --- OS / Editors ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Misc ---
+*.swp
