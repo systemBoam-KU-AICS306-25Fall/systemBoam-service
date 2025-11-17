@@ -21,11 +21,12 @@ router = APIRouter(prefix="/api/v1/home", tags=["home"])
 
 # ---------- Pydantic Response Models ----------
 
+
 class NewsItem(BaseModel):
     rank: int
     title: str
+    cve: Optional[str] = None  # single CVE id as in the spec example
     link: AnyHttpUrl
-    cves: List[str] = Field(default_factory=list)
 
 
 class TodayNewsResponse(BaseModel):
@@ -56,6 +57,7 @@ class RankingItem(BaseModel):
 
 class RankingsResponse(BaseModel):
     items: List[RankingItem] = Field(default_factory=list)
+
 
 # ---------- Utils ----------
 
@@ -105,7 +107,9 @@ def _safe_float(x: Optional[object]) -> float:
     """
     return float(x) if x is not None else 0.0
 
+
 # ---------- 1.1 Today's CVE News ----------
+
 
 @router.get("/today-news", response_model=TodayNewsResponse)
 def get_today_news(limit: int = Query(10, ge=1, le=50)):
@@ -119,8 +123,8 @@ def get_today_news(limit: int = Query(10, ge=1, le=50)):
             {
               "rank": 1,
               "title": "...",
-              "link": "https://...",
-              "cves": ["CVE-XXXX-YYYY", ...]
+              "cve": "CVE-XXXX-YYYY",
+              "link": "https://.../article/123"
             },
             ...
           ]
@@ -150,12 +154,14 @@ def get_today_news(limit: int = Query(10, ge=1, le=50)):
                 sql, {"start_utc": start_utc, "end_utc": end_utc, "limit": limit}
             ).mappings().all()
             for i, r in enumerate(rows, start=1):
+                cve_ids = list(r["cve_ids"] or [])
+                first_cve = cve_ids[0] if cve_ids else None
                 items.append(
                     NewsItem(
                         rank=i,
                         title=r["title"],
+                        cve=first_cve,
                         link=r["url"],
-                        cves=list(r["cve_ids"] or []),
                     )
                 )
     except DBAPIError:
@@ -164,7 +170,9 @@ def get_today_news(limit: int = Query(10, ge=1, le=50)):
 
     return TodayNewsResponse(date=date_str, items=items)
 
+
 # ---------- 1.2 Latest CVE Updates ----------
+
 
 @router.get("/latest-updates", response_model=LatestUpdatesResponse)
 def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
@@ -209,7 +217,9 @@ def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
     ]
     return LatestUpdatesResponse(items=items)
 
+
 # ---------- 1.3 CVE Rankings ----------
+
 
 @router.get("/rankings", response_model=RankingsResponse)
 def get_rankings(
