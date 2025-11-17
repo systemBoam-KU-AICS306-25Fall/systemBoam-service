@@ -1,11 +1,14 @@
 # app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import home
 
-app = FastAPI(title="CVE Intel API")
+# routers
+from app.api.v1 import home as home_router
+from app.api.v1 import cve as cve_router
 
-# Testing CORS
+app = FastAPI(title="systemBoam API", version="1.0.0")
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,4 +17,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(home.router, prefix="/api/v1/home")
+app.include_router(home_router.router)
+app.include_router(cve_router.router)
+
+@app.get("/healthz")
+def healthz():
+    """Liveness probe endpoint."""
+    return {"ok": True}

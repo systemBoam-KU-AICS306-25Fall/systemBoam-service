@@ -12,11 +12,12 @@ from zoneinfo import ZoneInfo
 
 # DB engine import
 try:
-    from app.db import engine  # 프로젝트 구조에 맞춘 위치
+    from app.db import engine  # Adjusted to project structure
 except Exception:
-    engine = None  # 테스트/임시 스텁
+    engine = None  # Fallback stub for tests/dev
 
-router = APIRouter()
+# Router with prefix and tags for API versioning and grouping
+router = APIRouter(prefix="/api/v1/home", tags=["home"])
 
 # ---------- Pydantic Response Models ----------
 
@@ -26,17 +27,21 @@ class NewsItem(BaseModel):
     link: AnyHttpUrl
     cves: List[str] = Field(default_factory=list)
 
+
 class TodayNewsResponse(BaseModel):
     date: str  # YYYY-MM-DD
     items: List[NewsItem] = Field(default_factory=list)
+
 
 class LatestUpdateItem(BaseModel):
     cve: str
     summary: str
     link: str
 
+
 class LatestUpdatesResponse(BaseModel):
     items: List[LatestUpdateItem] = Field(default_factory=list)
+
 
 class RankingItem(BaseModel):
     rank: int
@@ -48,6 +53,7 @@ class RankingItem(BaseModel):
     score: float
     link: str
 
+
 class RankingsResponse(BaseModel):
     items: List[RankingItem] = Field(default_factory=list)
 
@@ -55,7 +61,17 @@ class RankingsResponse(BaseModel):
 
 SEOUL = ZoneInfo("Asia/Seoul")
 
+
 def today_window_utc() -> tuple[datetime, datetime, str]:
+    """
+    Compute today's time window in Asia/Seoul and convert it to UTC.
+
+    Returns:
+        tuple:
+            - start_utc: UTC start datetime of today in Asia/Seoul
+            - end_utc:   UTC end datetime of today in Asia/Seoul
+            - date_str:  'YYYY-MM-DD' string in local (Seoul) date
+    """
     now_local = datetime.now(SEOUL)
     local_start = datetime.combine(now_local.date(), time(0, 0, 0), tzinfo=SEOUL)
     local_end = local_start + timedelta(days=1)
@@ -65,11 +81,28 @@ def today_window_utc() -> tuple[datetime, datetime, str]:
         now_local.date().isoformat(),
     )
 
+
 def ensure_engine():
+    """
+    Ensure SQLAlchemy engine is initialized before handling DB queries.
+
+    Raises:
+        HTTPException: if engine is not initialized.
+    """
     if engine is None:
         raise HTTPException(status_code=500, detail="DB engine is not initialized.")
 
+
 def _safe_float(x: Optional[object]) -> float:
+    """
+    Safely cast a nullable value to float, returning 0.0 if None.
+
+    Args:
+        x: Any nullable value.
+
+    Returns:
+        float: Parsed float value or 0.0 if x is None.
+    """
     return float(x) if x is not None else 0.0
 
 # ---------- 1.1 Today's CVE News ----------
@@ -77,7 +110,21 @@ def _safe_float(x: Optional[object]) -> float:
 @router.get("/today-news", response_model=TodayNewsResponse)
 def get_today_news(limit: int = Query(10, ge=1, le=50)):
     """
-    Returns: { date: 'YYYY-MM-DD', items: [{rank,title,link,cves[]}] }
+    Return today's CVE-related news articles.
+
+    Response format:
+        {
+          "date": "YYYY-MM-DD",
+          "items": [
+            {
+              "rank": 1,
+              "title": "...",
+              "link": "https://...",
+              "cves": ["CVE-XXXX-YYYY", ...]
+            },
+            ...
+          ]
+        }
     """
     ensure_engine()
     start_utc, end_utc, date_str = today_window_utc()
@@ -111,8 +158,8 @@ def get_today_news(limit: int = Query(10, ge=1, le=50)):
                         cves=list(r["cve_ids"] or []),
                     )
                 )
-    except DBAPIError as e:
-        # 테이블 부재/권한 문제 시에도 빈 목록 반환
+    except DBAPIError:
+        # On DB errors (missing table, permission issues, etc.), return an empty list safely
         return TodayNewsResponse(date=date_str, items=[])
 
     return TodayNewsResponse(date=date_str, items=items)
@@ -122,7 +169,19 @@ def get_today_news(limit: int = Query(10, ge=1, le=50)):
 @router.get("/latest-updates", response_model=LatestUpdatesResponse)
 def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
     """
-    Returns: { items: [{cve, summary, link}] }
+    Return the latest updated published CVEs.
+
+    Response format:
+        {
+          "items": [
+            {
+              "cve": "CVE-XXXX-YYYY",
+              "summary": "...",
+              "link": "/cve/CVE-XXXX-YYYY"
+            },
+            ...
+          ]
+        }
     """
     ensure_engine()
     sql = text(
@@ -140,8 +199,8 @@ def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
     try:
         with engine.begin() as conn:
             rows = conn.execute(sql, {"limit": limit}).mappings().all()
-    except DBAPIError as e:
-        # 안전하게 빈 목록 반환
+    except DBAPIError:
+        # On DB errors, safely return an empty result
         return LatestUpdatesResponse(items=[])
 
     items = [
@@ -155,71 +214,88 @@ def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
 @router.get("/rankings", response_model=RankingsResponse)
 def get_rankings(
     limit: int = Query(10, ge=1, le=100),
-    window: str = Query("7d"),           # e.g., '7d', '30d'
-    kev_mode: str = Query("auto"),       # kept for future behavior switch: 'auto'|'kev'|'kve'
+    window: str = "7d",  # e.g., '7d', '30d'
 ):
     """
-    Returns: { items: [{rank,cve,cvss,epss,kve,activity,score,link}] }
-    Notes:
-      - cvss: 0~10 (as-is)
-      - epss: 0~1 in DB → scaled to 0~10 (one decimal)
-      - kve:  0~10; if only kev_flag exists, emulate 10/0
-      - activity: assume 0~10 scale
-      - score: internal weighted score for ordering (0~100)
+    Returns top CVEs sorted by a weighted score using existing signals.
+
+    Data sources:
+      - c.cvss_score                (0..10)
+      - epss from core.epss.epss    (0..1, fallback to c.epss_score)
+      - k.kve_score                 (assumed 0..10)
+      - a.activity_score            (assumed 0..10, filtered by 'window')
+
+    Weighted total (linear score, not normalized to 0..100):
+        total =
+            0.60 * cvss +
+            0.25 * (epss * 10.0) +
+            0.10 * kve +
+            0.05 * activity
+
+    Response format:
+        {
+          "items": [
+            {
+              "rank": 1,
+              "cve": "CVE-XXXX-YYYY",
+              "cvss": 9.8,
+              "epss": 0.42,
+              "kve": 8.5,
+              "activity": 6.0,
+              "score": 8.74,
+              "link": "/cve/CVE-XXXX-YYYY"
+            },
+            ...
+          ]
+        }
     """
     ensure_engine()
 
-    # Simple aggregation; USING 대신 명시적 조인으로 안정성 확보
+    # Build ranking based on a single SQL query combining scores from multiple tables.
     sql = text(
         """
-        WITH base AS (
-            SELECT
-                c.cve_id,
-                COALESCE(c.cvss_v31_score, 0)::float AS cvss,
-                COALESCE(ROUND(COALESCE(e.epss, 0) * 10.0, 1), 0)::float AS epss,
-                COALESCE(k.kve_score,
-                         CASE WHEN kv.kev_flag THEN 10.0 ELSE 0.0 END,
-                         0)::float AS kve,
-                COALESCE(a.activity_score, 0)::float AS activity
-            FROM core.cves c
-            LEFT JOIN core.epss     e  ON e.cve_id  = c.cve_id
-            LEFT JOIN core.kve      k  ON k.cve_id  = c.cve_id
-            LEFT JOIN core.kev      kv ON kv.cve_id = c.cve_id
-            LEFT JOIN core.activity a  ON a.cve_id  = c.cve_id AND a.time_window = :window
-            WHERE COALESCE(c.state, 'PUBLISHED') = 'PUBLISHED'
-        ),
-        scored AS (
-            SELECT
-                cve_id, cvss, epss, kve, activity,
-                (0.30*(cvss/10.0) + 0.40*(epss/10.0) + 0.20*(kve/10.0) + 0.10*(activity/10.0)) * 100.0
-                AS score
-            FROM base
-        )
-        SELECT cve_id, cvss, epss, kve, activity, score
-        FROM scored
-        ORDER BY score DESC NULLS LAST, kve DESC, cve_id ASC
+        SELECT
+          c.cve_id,
+          c.cvss_score                                        AS cvss,
+          COALESCE(e.epss, c.epss_score)                      AS epss,
+          k.kve_score                                         AS kve,
+          a.activity_score                                    AS activity,
+          (
+            0.60*COALESCE(c.cvss_score, 0) +
+            0.25*COALESCE(COALESCE(e.epss, c.epss_score, 0)*10.0, 0) +
+            0.10*COALESCE(k.kve_score, 0) +
+            0.05*COALESCE(a.activity_score, 0)
+          ) AS total
+        FROM core.cves c
+        LEFT JOIN core.epss     e ON e.cve_id = c.cve_id
+        LEFT JOIN core.kve      k ON k.cve_id = c.cve_id
+        LEFT JOIN core.activity a ON a.cve_id = c.cve_id AND a.time_window = :window
+        ORDER BY total DESC NULLS LAST, c.last_modified DESC NULLS LAST
         LIMIT :limit
         """
     )
 
     try:
-        with engine.begin() as conn:
+        # Use a simple connection for read-only ranking query
+        with engine.connect() as conn:
             rows = conn.execute(sql, {"limit": limit, "window": window}).mappings().all()
-    except DBAPIError as e:
+    except DBAPIError:
+        # On DB errors, return an empty ranking list
         return RankingsResponse(items=[])
 
     items: List[RankingItem] = []
-    for i, r in enumerate(rows, start=1):
+    for idx, r in enumerate(rows, start=1):
         items.append(
             RankingItem(
-                rank=i,
+                rank=idx,
                 cve=r["cve_id"],
                 cvss=_safe_float(r.get("cvss")),
                 epss=_safe_float(r.get("epss")),
                 kve=_safe_float(r.get("kve")),
                 activity=_safe_float(r.get("activity")),
-                score=_safe_float(r.get("score")),
+                score=round(_safe_float(r.get("total")), 2),
                 link=f"/cve/{r['cve_id']}",
             )
         )
+
     return RankingsResponse(items=items)
