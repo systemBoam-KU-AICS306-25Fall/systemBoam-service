@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Header } from "@/components/header"
 import { useParams, useRouter } from "next/navigation"
 import { Heart, ArrowLeft } from "lucide-react"
@@ -13,25 +13,147 @@ import { AIAdvisor } from "@/components/cve-detail/ai-advisor"
 import { QuickStatsCard } from "@/components/cve-detail/quick-stats-card"
 import { RelatedCVEsList } from "@/components/cve-detail/related-cves-list"
 import { RecentActivityLogs } from "@/components/cve-detail/recent-activity-logs"
+import { apiGet } from "@/lib/api"
+
+// ---- 백엔드 응답 타입(필요한 필드만) ----
+type BasicResp = {
+  cve: string
+  summary?: string | null
+}
+
+type ScoresResp = {
+  cve: string
+  overall_score: number
+  cvss: { base?: number }
+  epss?: number | null
+  kve?: number | null
+  activity?: number | null
+}
+
+// 화면에서 쓰기 위한 뷰 모델
+type CveViewModel = {
+  id: string
+  title: string
+  status: string
+  publishedDate?: string
+  severity?: string
+  cvssScore: number
+  epssScore: number
+  kveScore: number
+  activityScore: number
+}
 
 export default function CVEDetailPage() {
   const params = useParams()
   const router = useRouter()
   const cveId = params.id as string
+
   const [isFavorited, setIsFavorited] = useState(false)
 
-  // Mock data - replace with actual API call
-  const cveData = {
-    id: cveId,
-    title: "Critical Vulnerability in Popular Framework",
-    description: "A critical vulnerability was discovered in the popular web framework allowing remote code execution.",
-    status: "Active",
-    publishedDate: "2025-01-15",
-    severity: "Critical",
-    cvssScore: 9.8,
-    epssScore: 0.85,
-    kveScore: 0.92,
-    activityScore: 8.5,
+  const [cveData, setCveData] = useState<CveViewModel | null>(null)
+  const [aiSummary, setAiSummary] = useState<string>("")
+  const [loading, setLoading] = useState<boolean>(true)
+  const [error, setError] = useState<string | null>(null)
+
+  // ---- 최초 로딩 시 백엔드에서 CVE 정보 + 점수 + AI 요약 가져오기 ----
+  useEffect(() => {
+    if (!cveId) return
+
+    let active = true
+
+    async function load() {
+      setLoading(true)
+      setError(null)
+
+      try {
+        // 1) 기본 정보 + 점수 동시 조회
+        const [basic, scores] = await Promise.all([
+          apiGet<BasicResp>(`/api/v1/cve/${cveId}/basic`),
+          apiGet<ScoresResp>(`/api/v1/cve/${cveId}/scores?window=7d`),
+        ])
+
+        if (!active) return
+
+        const cvssBase = scores.cvss?.base ?? 0
+        const epss = scores.epss ?? 0
+        const kve = scores.kve ?? 0
+        const activity = scores.activity ?? 0
+
+        setCveData({
+          id: basic.cve,
+          // summary가 없으면 placeholder
+          title: basic.summary && basic.summary.trim().length > 0 ? basic.summary : "(요약 없음)",
+          // 지금은 상태/심각도는 스키마에 없으니 임시값
+          status: "Active",
+          publishedDate: undefined,
+          severity: undefined,
+          cvssScore: cvssBase,
+          epssScore: epss,
+          kveScore: kve,
+          activityScore: activity,
+        })
+
+        // 2) AI 요약 (템플릿 기반, 현재는 백엔드에서 점수/요약을 이용해 생성)
+        try {
+          const res = await fetch(`/api/v1/cve/${cveId}/ai-summary?window=7d`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          })
+          if (res.ok) {
+            const data = (await res.json()) as { ai_summary?: string }
+            if (active) {
+              setAiSummary(data.ai_summary ?? "")
+            }
+          } else {
+            if (active) setAiSummary("")
+          }
+        } catch {
+          if (active) setAiSummary("")
+        }
+      } catch (e) {
+        if (active) {
+          setError("CVE 상세 정보를 불러오는 중 오류가 발생했습니다.")
+        }
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+
+    load()
+
+    return () => {
+      active = false
+    }
+  }, [cveId])
+
+  // 로딩/에러 처리
+  if (loading && !cveData) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <main className="container mx-auto px-4 py-6">
+          <p className="text-sm text-muted-foreground">CVE 상세 정보를 불러오는 중입니다...</p>
+        </main>
+      </div>
+    )
+  }
+
+  if (!cveData) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <main className="container mx-auto px-4 py-6">
+          <Button variant="ghost" size="sm" onClick={() => router.back()} className="gap-2 mb-4">
+            <ArrowLeft size={16} />
+            뒤로가기
+          </Button>
+          <p className="text-sm text-red-400">
+            {error ?? "해당 CVE 정보를 찾을 수 없습니다."}
+          </p>
+        </main>
+      </div>
+    )
   }
 
   return (
@@ -70,13 +192,15 @@ export default function CVEDetailPage() {
         <div className="grid grid-cols-[65%_35%] gap-6">
           {/* Left Column */}
           <div className="space-y-6">
+            {/* 여기서부터 CVSS/EPSS/KVE/활동도는 모두 백엔드 점수 사용 */}
             <ScoreCard cveData={cveData} />
 
             <div className="bg-secondary/30 border border-border rounded-lg p-6">
               <h2 className="text-foreground mb-3 text-lg font-bold">AI 요약</h2>
               <p className="leading-relaxed text-sm text-gray-300">
-                이 취약점은 입력값 검증 부족으로 인해 공격자가 악의적인 페이로드를 실행할 수 있게 합니다. 영향받는
-                버전은 3.0 이상 3.5 미만이며, 즉시 패치가 필요합니다. 현재 야생에서 활발히 악용되고 있습니다.
+                {aiSummary && aiSummary.trim().length > 0
+                  ? aiSummary
+                  : "이 CVE에 대한 AI 요약 정보를 아직 생성하지 못했습니다. 점수와 메타데이터는 상단 카드에서 확인 가능합니다."}
               </p>
             </div>
 
@@ -88,6 +212,7 @@ export default function CVEDetailPage() {
 
           {/* Right Column */}
           <div className="space-y-6">
+            {/* QuickStatsCard는 아직 더미 데이터지만 cveData를 그대로 전달해 둡니다. */}
             <QuickStatsCard cveData={cveData} />
             <RelatedCVEsList />
             <RecentActivityLogs />

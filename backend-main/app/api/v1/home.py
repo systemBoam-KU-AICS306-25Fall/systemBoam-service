@@ -116,59 +116,46 @@ def get_today_news(limit: int = Query(10, ge=1, le=50)):
     """
     Return today's CVE-related news articles.
 
-    Response format:
-        {
-          "date": "YYYY-MM-DD",
-          "items": [
-            {
-              "rank": 1,
-              "title": "...",
-              "cve": "CVE-XXXX-YYYY",
-              "link": "https://.../article/123"
-            },
-            ...
-          ]
-        }
+    Simplified behavior:
+      - Use latest CVEs from core.cves as "news".
+      - No strict date filtering, just pick the latest ones.
     """
     ensure_engine()
-    start_utc, end_utc, date_str = today_window_utc()
+    # Just for display; not used for filtering
+    _, _, date_str = today_window_utc()
 
     sql = text(
         """
         SELECT
-            title,
-            url,
-            COALESCE(cve_ids, ARRAY[]::text[]) AS cve_ids
-        FROM core.news_articles
-        WHERE published_at >= :start_utc
-          AND published_at <  :end_utc
-        ORDER BY score DESC NULLS LAST, published_at DESC
+            cve_id,
+            COALESCE(NULLIF(summary, ''), cve_id) AS title
+        FROM core.cves
+        ORDER BY COALESCE(last_modified, published_at, updated_at, NOW()) DESC
         LIMIT :limit
         """
     )
 
-    items: List[NewsItem] = []
     try:
         with engine.begin() as conn:
-            rows = conn.execute(
-                sql, {"start_utc": start_utc, "end_utc": end_utc, "limit": limit}
-            ).mappings().all()
-            for i, r in enumerate(rows, start=1):
-                cve_ids = list(r["cve_ids"] or [])
-                first_cve = cve_ids[0] if cve_ids else None
-                items.append(
-                    NewsItem(
-                        rank=i,
-                        title=r["title"],
-                        cve=first_cve,
-                        link=r["url"],
-                    )
-                )
+            rows = conn.execute(sql, {"limit": limit}).mappings().all()
     except DBAPIError:
-        # On DB errors (missing table, permission issues, etc.), return an empty list safely
         return TodayNewsResponse(date=date_str, items=[])
 
+    items: List[NewsItem] = []
+    for i, r in enumerate(rows, start=1):
+        cve_id = r["cve_id"]
+        title = r["title"] or cve_id
+        items.append(
+            NewsItem(
+                rank=i,
+                title=title,
+                cve=cve_id,
+                link=f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+            )
+        )
+
     return TodayNewsResponse(date=date_str, items=items)
+
 
 
 # ---------- 1.2 Latest CVE Updates ----------
@@ -178,6 +165,12 @@ def get_today_news(limit: int = Query(10, ge=1, le=50)):
 def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
     """
     Return the latest updated published CVEs.
+
+    Data source:
+      - core.cves
+
+    Ordering:
+      - By the most recent of (last_modified, published_at, updated_at)
 
     Response format:
         {
@@ -198,8 +191,7 @@ def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
             cve_id AS cve,
             COALESCE(NULLIF(summary, ''), '(no summary)') AS summary
         FROM core.cves
-        WHERE COALESCE(state, 'PUBLISHED') = 'PUBLISHED'
-        ORDER BY last_modified DESC NULLS LAST
+        ORDER BY COALESCE(last_modified, published_at, updated_at, NOW()) DESC
         LIMIT :limit
         """
     )
@@ -220,7 +212,6 @@ def get_latest_updates(limit: int = Query(20, ge=1, le=100)):
 
 # ---------- 1.3 CVE Rankings ----------
 
-
 @router.get("/rankings", response_model=RankingsResponse)
 def get_rankings(
     limit: int = Query(10, ge=1, le=100),
@@ -232,37 +223,19 @@ def get_rankings(
     Data sources:
       - c.cvss_score                (0..10)
       - epss from core.epss.epss    (0..1, fallback to c.epss_score)
-      - k.kve_score                 (assumed 0..10)
-      - a.activity_score            (assumed 0..10, filtered by 'window')
+      - k.kve_score                 (0..10)
+      - a.activity_score            (0..10, filtered by 'window')
 
-    Weighted total (linear score, not normalized to 0..100):
+    Weighted total (scale roughly 0..10):
         total =
             0.60 * cvss +
             0.25 * (epss * 10.0) +
             0.10 * kve +
             0.05 * activity
-
-    Response format:
-        {
-          "items": [
-            {
-              "rank": 1,
-              "cve": "CVE-XXXX-YYYY",
-              "cvss": 9.8,
-              "epss": 0.42,
-              "kve": 8.5,
-              "activity": 6.0,
-              "score": 8.74,
-              "link": "/cve/CVE-XXXX-YYYY"
-            },
-            ...
-          ]
-        }
     """
     ensure_engine()
 
-    # Build ranking based on a single SQL query combining scores from multiple tables.
-    sql = text(
+    sql_full = text(
         """
         SELECT
           c.cve_id,
@@ -280,31 +253,65 @@ def get_rankings(
         LEFT JOIN core.epss     e ON e.cve_id = c.cve_id
         LEFT JOIN core.kve      k ON k.cve_id = c.cve_id
         LEFT JOIN core.activity a ON a.cve_id = c.cve_id AND a.time_window = :window
-        ORDER BY total DESC NULLS LAST, c.last_modified DESC NULLS LAST
+        ORDER BY total DESC NULLS LAST,
+                 c.last_modified DESC NULLS LAST
+        LIMIT :limit
+        """
+    )
+
+    sql_fallback = text(
+        """
+        SELECT
+          cve_id,
+          cvss_score                                        AS cvss,
+          epss_score                                        AS epss,
+          0.0                                               AS kve,
+          0.0                                               AS activity,
+          (
+            0.60*COALESCE(cvss_score, 0) +
+            0.25*COALESCE(epss_score, 0)*10.0
+          ) AS total
+        FROM core.cves
+        ORDER BY total DESC NULLS LAST,
+                 COALESCE(last_modified, published_at, updated_at, NOW()) DESC
         LIMIT :limit
         """
     )
 
     try:
-        # Use a simple connection for read-only ranking query
         with engine.connect() as conn:
-            rows = conn.execute(sql, {"limit": limit, "window": window}).mappings().all()
+            rows = conn.execute(sql_full, {"limit": limit, "window": window}).mappings().all()
     except DBAPIError:
-        # On DB errors, return an empty ranking list
-        return RankingsResponse(items=[])
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(sql_fallback, {"limit": limit}).mappings().all()
+        except DBAPIError:
+            return RankingsResponse(items=[])
 
     items: List[RankingItem] = []
     for idx, r in enumerate(rows, start=1):
+        cve_id = r["cve_id"]
+        cvss = _safe_float(r.get("cvss"))
+        epss = _safe_float(r.get("epss"))
+        kve = _safe_float(r.get("kve"))
+        activity = _safe_float(r.get("activity"))
+        score = (
+            0.60 * cvss
+            + 0.25 * (epss * 10.0)
+            + 0.10 * kve
+            + 0.05 * activity
+        )
+
         items.append(
             RankingItem(
                 rank=idx,
-                cve=r["cve_id"],
-                cvss=_safe_float(r.get("cvss")),
-                epss=_safe_float(r.get("epss")),
-                kve=_safe_float(r.get("kve")),
-                activity=_safe_float(r.get("activity")),
-                score=round(_safe_float(r.get("total")), 2),
-                link=f"/cve/{r['cve_id']}",
+                cve=cve_id,
+                cvss=cvss,
+                epss=epss,
+                kve=kve,
+                activity=activity,
+                score=round(score, 2),
+                link=f"/cve/{cve_id}",
             )
         )
 

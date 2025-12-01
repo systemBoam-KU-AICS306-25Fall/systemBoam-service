@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, KeyboardEvent } from "react"
 import { useRouter } from "next/navigation"
 import { Search, Tag } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -9,7 +9,7 @@ import { Card } from "@/components/ui/card"
 
 type SearchMode = "cve" | "keyword"
 
-// Mock CVE database for search
+// Mock CVE database for search (for suggestions only)
 const allCVEs = [
   { id: "CVE-2025-0001", title: "Apache Log4j Zero-Day", year: 2025 },
   { id: "CVE-2025-0002", title: "Apache Struts Vulnerability", year: 2025 },
@@ -45,10 +45,10 @@ export function SearchSection() {
     let results: typeof allCVEs = []
 
     if (mode === "cve") {
-      // Search by CVE ID (supports partial matches like "2025" or "CVE-2025")
+      // Suggest CVEs from mock list (UI 편의를 위한 자동완성)
       results = allCVEs.filter((cve) => cve.id.toLowerCase().includes(lowerQuery))
     } else {
-      // Search by keyword in title
+      // Search by keyword in title (mock list 기준)
       results = allCVEs.filter((cve) => cve.title.toLowerCase().includes(lowerQuery))
     }
 
@@ -62,14 +62,38 @@ export function SearchSection() {
     router.push(`/cve/${cveId}`)
   }
 
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return
+    const q = searchQuery.trim()
+    if (!q) return
+
+    setShowResults(false)
+
+    if (mode === "cve") {
+      // 입력한 값을 그대로 CVE ID로 사용해 상세 페이지로 이동
+      router.push(`/cve/${q}`)
+    } else {
+      // 키워드 모드: (검색 페이지가 있다면) 쿼리 파라미터로 전달
+      router.push(`/search?query=${encodeURIComponent(q)}`)
+    }
+  }
+
   return (
     <div className="space-y-4 relative">
       {/* Mode buttons */}
       <div className="flex gap-2">
-        <Button variant={mode === "cve" ? "default" : "outline"} onClick={() => setMode("cve")} size="sm">
+        <Button
+          variant={mode === "cve" ? "default" : "outline"}
+          onClick={() => setMode("cve")}
+          size="sm"
+        >
           CVE
         </Button>
-        <Button variant={mode === "keyword" ? "default" : "outline"} onClick={() => setMode("keyword")} size="sm">
+        <Button
+          variant={mode === "keyword" ? "default" : "outline"}
+          onClick={() => setMode("keyword")}
+          size="sm"
+        >
           키워드
         </Button>
       </div>
@@ -81,11 +105,16 @@ export function SearchSection() {
         </div>
         <Input
           type="text"
-          placeholder={mode === "cve" ? "CVE-2025-12345 또는 년도 입력 (예: 2025)" : "키워드를 입력"}
+          placeholder={
+            mode === "cve"
+              ? "CVE-2025-12345 또는 년도 입력 (예: 2025)"
+              : "키워드를 입력"
+          }
           className="pl-10 h-12 text-base bg-card"
           value={searchQuery}
           onChange={(e) => handleSearch(e.target.value)}
           onFocus={() => searchQuery && setShowResults(true)}
+          onKeyDown={handleKeyDown}
         />
 
         {showResults && searchResults.length > 0 && (
@@ -97,8 +126,12 @@ export function SearchSection() {
                   className="p-3 hover:bg-secondary cursor-pointer transition-colors"
                   onClick={() => handleResultClick(cve.id)}
                 >
-                  <div className="font-mono text-sm font-semibold text-primary">{cve.id}</div>
-                  <div className="text-xs text-muted-foreground mt-1">{cve.title}</div>
+                  <div className="font-mono text-sm font-semibold text-primary">
+                    {cve.id}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {cve.title}
+                  </div>
                 </div>
               ))}
             </div>
@@ -107,7 +140,9 @@ export function SearchSection() {
 
         {showResults && searchResults.length === 0 && searchQuery && (
           <Card className="absolute top-full left-0 right-0 mt-2 z-20 bg-card border-border p-3">
-            <div className="text-sm text-muted-foreground text-center">검색 결과가 없습니다</div>
+            <div className="text-sm text-muted-foreground text-center">
+              검색 결과가 없습니다
+            </div>
           </Card>
         )}
       </div>

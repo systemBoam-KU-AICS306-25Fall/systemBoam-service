@@ -190,13 +190,73 @@ def post_ai_summary(cve: str, window: str = "7d"):
 
     This does not call any external LLM; it only uses the CVE's scores and basic info.
     """
-    s = get_scores(cve, window=window)
-    b = get_basic(cve)
-    msg = (
-        f"Summary for {b.cve}. CVSS {s.cvss.get('base')}, "
-        f"EPSS {s.epss}, KVE {s.kve}, Activity {s.activity}. "
-        f"Overall score {s.overall_score}."
+    ensure_engine()
+
+    scores = get_scores(cve, window=window)
+    basic  = get_basic(cve)
+
+    cvss = float(scores.cvss.get("base") or 0.0)
+    epss = float(scores.epss or 0.0)
+    kve  = float(scores.kve or 0.0)
+    act  = float(scores.activity or 0.0)
+    overall = float(scores.overall_score or 0.0)
+    summary = (basic.summary or "").strip()
+
+    # CVSS 기반 심각도 구간
+    if cvss >= 9.0:
+        severity_label = "극히 높은 심각도"
+    elif cvss >= 7.0:
+        severity_label = "높은 심각도"
+    elif cvss >= 4.0:
+        severity_label = "중간 수준의 심각도"
+    else:
+        severity_label = "낮은 심각도"
+
+    # EPSS 기반 악용 가능성
+    if epss >= 0.7:
+        exploit_label = "실제 악용 가능성이 매우 높은 편입니다."
+    elif epss >= 0.4:
+        exploit_label = "실제 악용 가능성이 중간 이상입니다."
+    elif epss > 0.0:
+        exploit_label = "실제 악용 가능성은 상대적으로 낮은 편입니다."
+    else:
+        exploit_label = "EPSS 데이터가 없어 악용 가능성을 추정하기 어렵습니다."
+
+    # KVE 기반 노출도
+    if kve >= 8.0:
+        exposure_label = "내부 자산 관점에서 노출도가 매우 높아 우선 대응이 필요합니다."
+    elif kve >= 5.0:
+        exposure_label = "내부 자산 관점에서 노출도가 중간 수준으로 관리가 필요합니다."
+    elif kve > 0.0:
+        exposure_label = "내부 자산 관점에서 노출도가 낮은 편입니다."
+    else:
+        exposure_label = "KVE 데이터가 없어 자산 노출도는 기본값(0)으로 간주합니다."
+
+    # 활동도 기반 문구
+    if act >= 7.0:
+        activity_label = "최근 관측된 공격 활동이 활발한 편입니다."
+    elif act >= 3.0:
+        activity_label = "최근 일부 공격 활동이 관측되었습니다."
+    elif act > 0.0:
+        activity_label = "최근 공격 활동은 거의 없지만 잠재적 리스크는 존재합니다."
+    else:
+        activity_label = "관련 공격 활동 데이터가 없거나 거의 관측되지 않았습니다."
+
+    parts = []
+
+    head = f"{basic.cve}는 {severity_label}의 취약점입니다."
+    if summary:
+        head += f" 요약 설명: {summary}"
+    parts.append(head)
+
+    parts.append(
+        f"CVSS 점수는 {cvss:.1f}, EPSS {epss:.2f}, KVE {kve:.1f}, 활동도 {act:.1f}이며 "
+        f"이를 바탕으로 한 종합 점수는 {overall:.2f}입니다."
     )
+
+    parts.append(f"{exploit_label} {exposure_label} {activity_label}")
+
+    msg = " ".join(parts)
     return AISummaryResp(ai_summary=msg)
 
 
