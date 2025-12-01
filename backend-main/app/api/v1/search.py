@@ -56,9 +56,9 @@ def search(
     Search for CVEs by ID or keyword.
 
     Behavior:
-        - type='cve'      → exact match on cve_id.
+        - type='cve'      → partial match on cve_id (ILIKE '%q%').
         - type='keyword'  → ILIKE search on cve_id and summary.
-        - type is None    → automatically treated as 'cve' if q looks like 'CVE-YYYY-NNNN',
+        - type is None    → automatically treated as 'cve' if q looks like 'CVE-YYYY',
                             otherwise 'keyword'.
     """
     ensure_engine()
@@ -76,23 +76,28 @@ def search(
     try:
         with engine.begin() as conn:
             if mode == "cve":
+                # CVE 모드: cve_id 부분 일치로 자동완성/연관 검색어처럼 동작
                 sql = text(
                     """
                     SELECT
                         cve_id,
                         COALESCE(NULLIF(summary, ''), '(no summary)') AS summary
                     FROM core.cves
-                    WHERE cve_id = :cve_id
+                    WHERE cve_id ILIKE :pattern
                     ORDER BY last_modified DESC NULLS LAST
                     LIMIT :limit
                     """
                 )
                 rows = conn.execute(
                     sql,
-                    {"cve_id": q_norm, "limit": limit},
+                    {
+                        # 예: q가 "2025" → "%2025%" → "CVE-2025-0001" 등 매칭
+                        "pattern": f"%{q_norm}%",
+                        "limit": limit,
+                    },
                 ).mappings().all()
             else:
-                # keyword search
+                # keyword search: cve_id, summary 모두 대상
                 sql = text(
                     """
                     SELECT

@@ -6,33 +6,28 @@ import { Search, Tag } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
+import { apiGet } from "@/lib/api"
 
 type SearchMode = "cve" | "keyword"
 
-// Mock CVE database for search (for suggestions only)
-const allCVEs = [
-  { id: "CVE-2025-0001", title: "Apache Log4j Zero-Day", year: 2025 },
-  { id: "CVE-2025-0002", title: "Apache Struts Vulnerability", year: 2025 },
-  { id: "CVE-2025-0003", title: "Windows Kernel Vulnerability", year: 2025 },
-  { id: "CVE-2025-0004", title: "SQL Injection in CMS", year: 2025 },
-  { id: "CVE-2025-0005", title: "CMS Authentication Bypass", year: 2025 },
-  { id: "CVE-2025-0006", title: "CMS RCE Vulnerability", year: 2025 },
-  { id: "CVE-2025-0007", title: "OpenSSL Remote Code Execution", year: 2025 },
-  { id: "CVE-2025-0008", title: "VPN Authentication Bypass", year: 2025 },
-  { id: "CVE-2025-0009", title: "VPN Encryption Flaw", year: 2025 },
-  { id: "CVE-2024-1001", title: "Database Vulnerability", year: 2024 },
-  { id: "CVE-2024-1002", title: "Container Escape", year: 2024 },
-  { id: "CVE-2023-5001", title: "Browser XSS", year: 2023 },
-]
+type SearchResult = {
+  cve: string
+  summary: string
+  link: string
+}
+
+type SearchResponse = {
+  results: SearchResult[]
+}
 
 export function SearchSection() {
   const router = useRouter()
   const [mode, setMode] = useState<SearchMode>("cve")
   const [searchQuery, setSearchQuery] = useState("")
-  const [searchResults, setSearchResults] = useState<typeof allCVEs>([])
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [showResults, setShowResults] = useState(false)
 
-  const handleSearch = (query: string) => {
+  const handleSearch = async (query: string) => {
     setSearchQuery(query)
 
     if (!query.trim()) {
@@ -41,19 +36,20 @@ export function SearchSection() {
       return
     }
 
-    const lowerQuery = query.toLowerCase()
-    let results: typeof allCVEs = []
+    try {
+      // 백엔드 검색 API 호출
+      // mode === "cve" → type=cve, mode === "keyword" → type=keyword
+      const resp = await apiGet<SearchResponse>(
+        `/api/v1/search?q=${encodeURIComponent(query)}&type=${mode}`
+      )
 
-    if (mode === "cve") {
-      // Suggest CVEs from mock list (UI 편의를 위한 자동완성)
-      results = allCVEs.filter((cve) => cve.id.toLowerCase().includes(lowerQuery))
-    } else {
-      // Search by keyword in title (mock list 기준)
-      results = allCVEs.filter((cve) => cve.title.toLowerCase().includes(lowerQuery))
+      setSearchResults(resp.results ?? [])
+      setShowResults(true)
+    } catch (e) {
+      // 에러 시 결과 창만 “없음”으로 표시
+      setSearchResults([])
+      setShowResults(true)
     }
-
-    setSearchResults(results)
-    setShowResults(true)
   }
 
   const handleResultClick = (cveId: string) => {
@@ -112,7 +108,10 @@ export function SearchSection() {
           }
           className="pl-10 h-12 text-base bg-card"
           value={searchQuery}
-          onChange={(e) => handleSearch(e.target.value)}
+          onChange={(e) => {
+            // UI는 그대로 유지, 입력 변경 시마다 백엔드 검색
+            void handleSearch(e.target.value)
+          }}
           onFocus={() => searchQuery && setShowResults(true)}
           onKeyDown={handleKeyDown}
         />
@@ -120,17 +119,17 @@ export function SearchSection() {
         {showResults && searchResults.length > 0 && (
           <Card className="absolute top-full left-0 right-0 mt-2 z-20 bg-card border-border max-h-64 overflow-y-auto">
             <div className="divide-y divide-border">
-              {searchResults.map((cve) => (
+              {searchResults.map((item) => (
                 <div
-                  key={cve.id}
+                  key={item.cve}
                   className="p-3 hover:bg-secondary cursor-pointer transition-colors"
-                  onClick={() => handleResultClick(cve.id)}
+                  onClick={() => handleResultClick(item.cve)}
                 >
                   <div className="font-mono text-sm font-semibold text-primary">
-                    {cve.id}
+                    {item.cve}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">
-                    {cve.title}
+                    {item.summary || "(no summary)"}
                   </div>
                 </div>
               ))}

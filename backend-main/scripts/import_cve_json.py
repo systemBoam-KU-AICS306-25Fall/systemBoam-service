@@ -18,10 +18,20 @@ DATA_DIR = (Path.home() / "data" / "run_20251125_094959").resolve()
 
 def extract_description(data: dict) -> str:
     """
-    JSON 안에서 설명/요약 텍스트를 뽑아옵니다.
-    JSON 구조는 모르기 때문에 대표적인 키 이름만 우선 시도합니다. (추측입니다)
-    필요하면 candidate_keys를 실제 구조에 맞게 바꾸세요.
+    JSON에서 CVE 요약 텍스트를 추출합니다.
+
+    1순위: abstract.summary
+    2순위: 기존 candidate_keys (description / summary / details)
     """
+
+    # 1) JSON 안의 abstract.summary 우선 사용
+    abstract = data.get("abstract")
+    if isinstance(abstract, dict):
+        s = abstract.get("summary")
+        if isinstance(s, str) and s.strip():
+            return s.strip()
+
+    # 2) 기존 일반적인 키들 fallback
     candidate_keys = ["description", "summary", "details"]
 
     for key in candidate_keys:
@@ -30,15 +40,21 @@ def extract_description(data: dict) -> str:
         val = data[key]
 
         if isinstance(val, dict):
+            # 자주 쓰이는 서브 키들
             for subkey in ["en", "ko", "value", "text"]:
                 if subkey in val and isinstance(val[subkey], str):
-                    return val[subkey]
+                    text_val = val[subkey].strip()
+                    if text_val:
+                        return text_val
+            # dict 안 아무 스트링이나 하나라도 있으면 사용
             for v in val.values():
-                if isinstance(v, str):
-                    return v
-        elif isinstance(val, str):
-            return val
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
 
+        elif isinstance(val, str) and val.strip():
+            return val.strip()
+
+    # 3) 그래도 못 찾으면 빈 문자열 반환
     return ""
 
 
@@ -225,28 +241,68 @@ def main():
     # raw가 NOT NULL이면 반드시 값을 넣어야 합니다.
     need_raw = (raw_type is not None and raw_nullable == "NO")
 
-    # --- UPDATE SQL 동적 구성 ---
-    set_clauses = [f"{desc_col} = COALESCE({desc_col}, :summary)"]
-    if need_raw:
-        set_clauses.append("raw = COALESCE(raw, :raw)")
-    if has_raw_json:
-        set_clauses.append("raw_json = :raw_json")
+    # 공통으로 쓸 표현식
+    # - :summary 가 빈 문자열이면 기존 {desc_col} 유지
+    # - :summary 가 비어 있지 않으면 새 요약으로 덮어쓰기
+    summary_expr = f"COALESCE(NULLIF(:summary, ''), {desc_col})"
+
+    # 점수 컬럼에 대한 SET 절 공통 구성
+    score_set_clauses = []
     if has_cvss:
-        set_clauses.append("cvss_score = COALESCE(:cvss_score, cvss_score)")
+        score_set_clauses.append("cvss_score = COALESCE(:cvss_score, cvss_score)")
     if has_epss:
-        set_clauses.append("epss_score = COALESCE(:epss_score, epss_score)")
+        score_set_clauses.append("epss_score = COALESCE(:epss_score, epss_score)")
     if has_severity:
-        set_clauses.append("severity = COALESCE(:severity, severity)")
+        score_set_clauses.append("severity = COALESCE(:severity, severity)")
 
-    update_sql = text(
-        f"""
-        UPDATE core.cves
-        SET {", ".join(set_clauses)}
-        WHERE cve_id = :cve_id
-        """
-    )
+    score_clause_sql = ""
+    if score_set_clauses:
+        # 앞쪽에 이미 컬럼들이 있으므로 앞에 콤마를 붙여 추가
+        score_clause_sql = ",\n                " + ",\n                ".join(score_set_clauses)
 
-    # --- INSERT SQL 동적 구성 ---
+    # --- UPDATE SQL 구성 (요약 빈 문자열이면 기존 값 유지) ---
+    if has_raw_json and need_raw:
+        update_sql = text(
+            f"""
+            UPDATE core.cves
+            SET
+                {desc_col} = {summary_expr},
+                raw        = COALESCE(raw, :raw),
+                raw_json   = :raw_json{score_clause_sql}
+            WHERE cve_id = :cve_id
+            """
+        )
+    elif has_raw_json and not need_raw:
+        update_sql = text(
+            f"""
+            UPDATE core.cves
+            SET
+                {desc_col} = {summary_expr},
+                raw_json   = :raw_json{score_clause_sql}
+            WHERE cve_id = :cve_id
+            """
+        )
+    elif not has_raw_json and need_raw:
+        update_sql = text(
+            f"""
+            UPDATE core.cves
+            SET
+                {desc_col} = {summary_expr},
+                raw        = COALESCE(raw, :raw){score_clause_sql}
+            WHERE cve_id = :cve_id
+            """
+        )
+    else:  # raw_json 없음, raw 필요 없음
+        update_sql = text(
+            f"""
+            UPDATE core.cves
+            SET
+                {desc_col} = {summary_expr}{score_clause_sql}
+            WHERE cve_id = :cve_id
+            """
+        )
+
+    # --- INSERT SQL 동적 구성 (기존 로직 그대로 유지) ---
     insert_cols = ["cve_id", desc_col]
     insert_vals = [":cve_id", ":summary"]
     if need_raw:
